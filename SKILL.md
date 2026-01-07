@@ -313,18 +313,25 @@ CREATE SERVICE <service_name>
   $$;
 ```
 
-### Monitor Deployment
+### Monitor Deployment and Wait for Ready
+
+Poll the service status until it shows READY (may take 2-5 minutes):
 
 ```sql
--- Check status (wait for READY)
 SELECT SYSTEM$GET_SERVICE_STATUS('<service_name>');
+```
 
--- Get logs if issues
+If status shows errors, check logs:
+```sql
 CALL SYSTEM$GET_SERVICE_LOGS('<service_name>', '0', '<container-name>', 100);
+```
 
--- Get public URL
+Once READY, get the public URL:
+```sql
 SHOW ENDPOINTS IN SERVICE <service_name>;
 ```
+
+**Emit the ingress URL to the user** from the `ingress_url` column.
 
 ---
 
@@ -337,6 +344,8 @@ ai_browser(
   instructions="Verify the dashboard loads correctly in production."
 )
 ```
+
+Share the final URL with the user after verification.
 
 ---
 
