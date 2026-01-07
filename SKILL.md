@@ -14,6 +14,8 @@ This skill guides you through building a Next.js application from scratch and de
 Before writing any code, clarify with the user:
 - What data should the app use? (Search for tables/views in their Snowflake account)
 - Any specific UI preferences? (Colors, layout, branding)
+
+**CRITICAL: Never use mock/sample/dummy data.** Always connect to real Snowflake tables. If the user hasn't specified tables, use `snowflake_object_search` to find relevant tables in their account.
 ---
 
 ## Step 2: Create Next.js Project
@@ -79,6 +81,24 @@ module.exports = nextConfig
 
 ### Create UI Components
 
+### Data Fetching (CRITICAL)
+
+**NEVER use mock data, sample data, or placeholder values.** All data must come from real Snowflake tables via:
+- Server-side API routes using `snowflake-sdk`
+- Direct queries to user's Snowflake tables
+
+```typescript
+// lib/snowflake.ts - Connection setup
+import snowflake from 'snowflake-sdk';
+
+export async function querySnowflake(sql: string) {
+  const connection = snowflake.createConnection({
+    // Use environment variables or SPCS token
+  });
+  // Execute query and return real data
+}
+```
+
 ## Step 4: Test Locally (REQUIRED)
 
 **CRITICAL: Always test locally before deploying to SPCS.**
@@ -105,7 +125,7 @@ ai_browser(
 ### Test Checklist
 - [ ] Page loads without errors
 - [ ] All charts/visualizations render
-- [ ] Data displays correctly
+- [ ] Data displays correctly (from real Snowflake tables, NOT mock data)
 - [ ] Responsive design works
 - [ ] No console errors
 
@@ -119,6 +139,22 @@ Fix any build errors before proceeding. Common issues:
 - TypeScript errors
 - Missing dependencies
 - ESLint warnings
+
+### **USER CONFIRMATION REQUIRED**
+
+**STOP HERE AND WAIT FOR USER CONFIRMATION.**
+
+After local testing, emit the localhost URL and explicitly ask the user:
+
+```
+The app is running at http://localhost:3000
+
+Please review the application and confirm it looks good before I proceed with Snowflake SPCS deployment.
+
+Do you want me to proceed with deployment? (yes/no)
+```
+
+**DO NOT proceed to Step 5 until the user explicitly confirms the app looks correct.**
 
 ---
 
@@ -341,6 +377,9 @@ Use `ALTER SERVICE ... FROM SPECIFICATION` instead of SUSPEND/RESUME.
 
 ### 4. Build-time Errors
 During `npm run build`, Snowflake connection errors are expected (no OAuth token at build time). Routes work at runtime.
+
+### 5. No Mock Data
+**NEVER use mock, sample, or dummy data.** Always query real Snowflake tables. If data fetch fails, show an error message rather than falling back to fake data.
 
 ---
 
