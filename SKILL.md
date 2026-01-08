@@ -65,11 +65,62 @@ npx create-next-app@latest <app-name> --typescript --tailwind --eslint --app --s
 cd <app-name>
 ```
 
-### Install Dependencies
+### Initialize shadcn/ui (REQUIRED)
+
+**IMPORTANT:** Always use shadcn/ui for UI components. This ensures consistent, professional styling.
 
 ```bash
-npm install recharts lucide-react clsx tailwind-merge snowflake-sdk
+npx shadcn@latest init -d
 ```
+
+This creates:
+- `components/ui/` directory for shadcn components
+- `lib/utils.ts` with the `cn()` helper
+- Proper CSS variables in `globals.css`
+
+### Add Required shadcn Components
+
+```bash
+npx shadcn@latest add card chart button table select input tabs badge skeleton dialog dropdown-menu separator tooltip
+```
+
+**CRITICAL for Charts:** Use `recharts@2.15.4` (the version shadcn specifies):
+```bash
+npm install recharts@2.15.4
+```
+
+### Install Additional Dependencies
+
+```bash
+npm install lucide-react snowflake-sdk
+```
+
+### shadcn Chart Usage Pattern
+
+**Always use shadcn chart components with CSS variables for colors:**
+
+```typescript
+import { ChartConfig, ChartContainer, ChartTooltip, ChartTooltipContent, ChartLegend, ChartLegendContent } from "@/components/ui/chart"
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
+import { TrendingUp } from "lucide-react"
+
+const chartConfig = {
+  revenue: { label: "Revenue", color: "hsl(var(--chart-1))" },
+  orders: { label: "Orders", color: "hsl(var(--chart-2))" },
+} satisfies ChartConfig
+
+// Use var(--color-<key>) in chart fills/strokes
+<Bar dataKey="revenue" fill="var(--color-revenue)" />
+
+// Always include CardFooter with trend indicator
+<CardFooter className="flex-col gap-2 text-sm">
+  <div className="flex items-center gap-2 font-medium leading-none">
+    Trending up by 5.2% <TrendingUp className="h-4 w-4" />
+  </div>
+</CardFooter>
+```
+
+**Available chart colors:** `--chart-1` through `--chart-5` (defined in globals.css)
 
 ### Configure next.config.ts
 
@@ -498,7 +549,9 @@ $$;
 | Step | Command/Action |
 |------|----------------|
 | Create project | `npx create-next-app@latest <name> --typescript --tailwind --app` |
-| Install deps | `npm install recharts lucide-react snowflake-sdk` |
+| Init shadcn | `npx shadcn@latest init -d` |
+| Add components | `npx shadcn@latest add card chart button table select input tabs badge skeleton dialog dropdown-menu separator tooltip` |
+| Install deps | `npm install recharts@2.15.4 lucide-react snowflake-sdk` |
 | Test locally | `npm run dev` → browser opens for SSO |
 | Build | `npm run build` |
 | Docker build | `docker build --platform linux/amd64 -t <img>:latest .` |
