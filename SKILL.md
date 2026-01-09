@@ -158,6 +158,8 @@ export default nextConfig;
 
 ### Create Snowflake Connection (lib/snowflake.ts)
 
+Connection is cached for performance, but includes automatic reconnection when Snowflake terminates idle connections (typically after 24+ hours).
+
 ```typescript
 import snowflake from "snowflake-sdk";
 import fs from "fs";
@@ -167,14 +169,15 @@ let connectionPromise: Promise<snowflake.Connection> | null = null;
 
 snowflake.configure({ logLevel: "ERROR" });
 
-async function getConnection(): Promise<snowflake.Connection> {
-  if (connection) {
-    return connection;
-  }
+// Reset cached connection (called on stale connection errors)
+function resetConnection() {
+  connection = null;
+  connectionPromise = null;
+}
 
-  if (connectionPromise) {
-    return connectionPromise;
-  }
+async function getConnection(): Promise<snowflake.Connection> {
+  if (connection) return connection;
+  if (connectionPromise) return connectionPromise;
 
   connectionPromise = (async () => {
     let connConfig: snowflake.ConnectionOptions;
@@ -231,7 +234,7 @@ async function getConnection(): Promise<snowflake.Connection> {
   return connectionPromise;
 }
 
-export async function querySnowflake<T>(sql: string): Promise<T[]> {
+async function querySnowflake<T>(sql: string): Promise<T[]> {
   const conn = await getConnection();
   return new Promise((resolve, reject) => {
     conn.execute({
@@ -239,6 +242,10 @@ export async function querySnowflake<T>(sql: string): Promise<T[]> {
       complete: (err, stmt, rows) => {
         if (err) {
           console.error("Query error:", err.message);
+          // Reset connection on termination errors so next query reconnects
+          if (err.message.includes("terminated connection") || (err as any).code === 407002) {
+            resetConnection();
+          }
           reject(err);
         } else {
           resolve((rows || []) as T[]);
@@ -247,22 +254,36 @@ export async function querySnowflake<T>(sql: string): Promise<T[]> {
     });
   });
 }
+
+// Use this function in API routes - auto-reconnects on stale connections
+export async function querySnowflakeWithRetry<T>(sql: string, retries = 1): Promise<T[]> {
+  try {
+    return await querySnowflake<T>(sql);
+  } catch (err: unknown) {
+    const error = err as { message?: string; code?: number };
+    if (retries > 0 && (error.message?.includes("terminated connection") || error.code === 407002)) {
+      resetConnection();
+      return querySnowflakeWithRetry<T>(sql, retries - 1);
+    }
+    throw err;
+  }
+}
 ```
 
-**Note:** On first API request locally, a browser window opens for SSO login. Connection is cached for subsequent requests.
+**Note:** On first API request locally, a browser window opens for SSO login. Connection is cached but auto-reconnects if Snowflake terminates it.
 
 ### Create API Routes
 
-**All API routes MUST query real Snowflake data:**
+**All API routes MUST query real Snowflake data using `querySnowflakeWithRetry`:**
 
 ```typescript
 // app/api/data/route.ts
 import { NextResponse } from "next/server";
-import { querySnowflake } from "@/lib/snowflake";
+import { querySnowflakeWithRetry } from "@/lib/snowflake";
 
 export async function GET() {
   try {
-    const results = await querySnowflake<{ COL1: string; COL2: number }>(`
+    const results = await querySnowflakeWithRetry<{ COL1: string; COL2: number }>(`
       SELECT COL1, COL2 
       FROM <DATABASE>.<SCHEMA>.<TABLE>
       LIMIT 100
