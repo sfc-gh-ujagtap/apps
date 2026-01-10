@@ -110,15 +110,11 @@ export default nextConfig;
 
 ### How Detection Works
 
-The app detects its environment by checking for the SPCS token file:
-```typescript
-function isRunningInSPCS(): boolean {
-  return fs.existsSync("/snowflake/session/token");
-}
-```
+The app detects its environment by checking for the SPCS token file at `/snowflake/session/token`:
+- **Token exists** → Running in SPCS → Use OAuth authentication
+- **No token** → Local development → Use External Browser (SSO)
 
-- **Token exists** → Running in SPCS → Use OAuth with connection pool
-- **No token** → Local development → Use External Browser with single connection
+Both environments use a single cached connection with retry logic for simplicity.
 
 ---
 
@@ -143,105 +139,91 @@ function isRunningInSPCS(): boolean {
 
 ### Create Snowflake Connection (lib/snowflake.ts)
 
+This simplified pattern uses a single cached connection with retry logic for both local and SPCS environments:
+
 ```typescript
 import snowflake from "snowflake-sdk";
 import fs from "fs";
 
 snowflake.configure({ logLevel: "ERROR" });
 
-function isRunningInSPCS(): boolean {
-  const tokenPath = "/snowflake/session/token";
-  return fs.existsSync(tokenPath);
-}
-
-// ============ LOCAL DEVELOPMENT: Single Connection ============
 let connection: snowflake.Connection | null = null;
-let connectionPromise: Promise<snowflake.Connection> | null = null;
+let cachedToken: string | null = null;
 
-async function getConnection(): Promise<snowflake.Connection> {
-  if (connection) return connection;
-  if (connectionPromise) return connectionPromise;
-
-  connectionPromise = (async () => {
-    const connConfig: snowflake.ConnectionOptions = {
-      account: process.env.SNOWFLAKE_ACCOUNT || "<account>",
-      username: process.env.SNOWFLAKE_USER || "<username>",
-      authenticator: "EXTERNALBROWSER",
-      warehouse: process.env.SNOWFLAKE_WAREHOUSE || "<warehouse>",
-      database: process.env.SNOWFLAKE_DATABASE || "<database>",
-      schema: process.env.SNOWFLAKE_SCHEMA || "<schema>",
-    };
-
-    const conn = snowflake.createConnection(connConfig);
-    await conn.connectAsync(() => {});
-    connection = conn;
-    return connection;
-  })();
-
-  return connectionPromise;
+function getOAuthToken(): string | null {
+  const tokenPath = "/snowflake/session/token";
+  try {
+    if (fs.existsSync(tokenPath)) {
+      return fs.readFileSync(tokenPath, "utf8");
+    }
+  } catch {
+    // Not in SPCS environment
+  }
+  return null;
 }
 
-// ============ REMOTE (SPCS): Connection Pool ============
-let pool: snowflake.Pool<snowflake.Connection> | null = null;
-
-function getPool(): snowflake.Pool<snowflake.Connection> {
-  if (pool) return pool;
-
-  const token = fs.readFileSync("/snowflake/session/token", "utf8");
-  const host = process.env.SNOWFLAKE_HOST || "";
-
-  const connConfig: snowflake.ConnectionOptions = {
-    accessUrl: `https://${host}`,
-    account: host.split(".")[0] || "snowflake",
-    authenticator: "OAUTH",
-    token: token,
+function getConfig(): snowflake.ConnectionOptions {
+  const base = {
+    account: process.env.SNOWFLAKE_ACCOUNT || "<account>",
     warehouse: process.env.SNOWFLAKE_WAREHOUSE || "<warehouse>",
     database: process.env.SNOWFLAKE_DATABASE || "<database>",
     schema: process.env.SNOWFLAKE_SCHEMA || "<schema>",
   };
 
-  pool = snowflake.createPool(connConfig, {
-    max: 10,
-    min: 1,
-    evictionRunIntervalMillis: 60000,
-    idleTimeoutMillis: 300000,
-  });
+  const token = getOAuthToken();
+  if (token) {
+    return {
+      ...base,
+      host: process.env.SNOWFLAKE_HOST,
+      token,
+      authenticator: "oauth",
+    };
+  }
 
-  return pool;
+  return {
+    ...base,
+    username: process.env.SNOWFLAKE_USER || "<username>",
+    authenticator: "EXTERNALBROWSER",
+  };
 }
 
-// ============ Unified Query Function ============
-export async function querySnowflake<T>(sql: string): Promise<T[]> {
-  if (isRunningInSPCS()) {
-    const connectionPool = getPool();
-    return new Promise((resolve, reject) => {
-      connectionPool
-        .use(async (clientConnection) => {
-          return new Promise<T[]>((res, rej) => {
-            clientConnection.execute({
-              sqlText: sql,
-              complete: (err, stmt, rows) => {
-                if (err) {
-                  console.error("Query error:", err.message);
-                  rej(err);
-                } else {
-                  res((rows || []) as T[]);
-                }
-              },
-            });
-          });
-        })
-        .then(resolve)
-        .catch(reject);
-    });
-  } else {
+async function getConnection(): Promise<snowflake.Connection> {
+  const token = getOAuthToken();
+
+  if (connection && (!token || token === cachedToken)) {
+    return connection;
+  }
+
+  if (connection) {
+    console.log("OAuth token changed, reconnecting");
+    connection.destroy(() => {});
+  }
+
+  console.log(token ? "Connecting with OAuth token" : "Connecting with external browser");
+  const conn = snowflake.createConnection(getConfig());
+  await conn.connectAsync(() => {});
+  connection = conn;
+  cachedToken = token;
+  return connection;
+}
+
+function isRetryableError(err: unknown): boolean {
+  const error = err as { message?: string; code?: number };
+  return !!(
+    error.message?.includes("OAuth access token expired") ||
+    error.message?.includes("terminated connection") ||
+    error.code === 407002
+  );
+}
+
+export async function query<T>(sql: string, retries = 1): Promise<T[]> {
+  try {
     const conn = await getConnection();
-    return new Promise((resolve, reject) => {
+    return await new Promise<T[]>((resolve, reject) => {
       conn.execute({
         sqlText: sql,
         complete: (err, stmt, rows) => {
           if (err) {
-            console.error("Query error:", err.message);
             reject(err);
           } else {
             resolve((rows || []) as T[]);
@@ -249,22 +231,35 @@ export async function querySnowflake<T>(sql: string): Promise<T[]> {
         },
       });
     });
+  } catch (err) {
+    console.error("Query error:", (err as Error).message);
+    if (retries > 0 && isRetryableError(err)) {
+      connection = null;
+      return query(sql, retries - 1);
+    }
+    throw err;
   }
 }
 ```
 
+**Key features:**
+- Single connection for both environments (no pool complexity)
+- Auto-detects SPCS via token file presence
+- Handles OAuth token refresh by comparing cached vs current token
+- Retry logic handles session timeouts and expired tokens
+
 ### Create API Routes
 
-**All API routes MUST query real Snowflake data using `querySnowflake`:**
+**All API routes MUST query real Snowflake data using `query`:**
 
 ```typescript
 // app/api/data/route.ts
 import { NextResponse } from "next/server";
-import { querySnowflake } from "@/lib/snowflake";
+import { query } from "@/lib/snowflake";
 
 export async function GET() {
   try {
-    const results = await querySnowflake<{ COL1: string; COL2: number }>(`
+    const results = await query<{ COL1: string; COL2: number }>(`
       SELECT COL1, COL2 
       FROM <DATABASE>.<SCHEMA>.<TABLE>
       LIMIT 100
